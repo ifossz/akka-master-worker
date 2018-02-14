@@ -1,6 +1,6 @@
 package org.ifossz.amw.actor
 
-import akka.actor.{Actor, ActorLogging, ActorRef, Props, ReceiveTimeout}
+import akka.actor.{Actor, ActorLogging, ActorRef, Props, ReceiveTimeout, Terminated}
 import org.ifossz.amw.Settings
 
 import scala.concurrent.duration.Duration
@@ -10,9 +10,11 @@ object Worker {
 
   final case class Enlist(master: ActorRef)
 
-  final case class Task(taskId: String, input: Seq[Any], executable: Seq[Any] => Any)
+  final case class AssignTask[T, R](task: Task[T, R])
 
-  final case class TaskExecution(result: Try[Any])
+  final case class StartWork[T](work: Work[T])
+
+  final case class FinishWork[T](result: Try[T])
 
   final case object Retire
 
@@ -25,54 +27,75 @@ class Worker extends Actor with ActorLogging {
   import context._
 
   private val settings = Settings(context.system)
-  private val taskExecutor = context.actorOf(TaskExecutor.props)
 
-  def idle: Receive = {
+  private def idle: Receive = {
     case Enlist(master) =>
-      master ! Master.Register(self)
-      setReceiveTimeout(settings.Worker.WaitingTimeout)
-      become(waitingForWork(master))
+      master ! Master.RegisterWorker(self)
+      setReceiveTimeout(settings.Worker.RequestNextTaskInterval)
+      become(waitingForTask(master))
   }
 
-  def waitingForWork(master: ActorRef): Receive = {
+  private def waitingForTask(master: ActorRef): Receive = {
     case ReceiveTimeout =>
       master ! Master.NextTask
 
-    case Task(taskId, input, executable) =>
-      taskExecutor ! TaskExecutor.Task(input, executable)
-      setReceiveTimeout(Duration.Undefined)
-      become(working(master, taskId))
+    case AssignTask(task) =>
+      setReceiveTimeout(settings.Worker.RequestNextWorkInterval)
+      become(waitingForWork(master, task))
 
     case Retire =>
       setReceiveTimeout(Duration.Undefined)
       become(idle)
   }
 
-  def working(master: ActorRef, taskId: String, retireAfterExecution: Boolean = false): Receive = {
-    case Task(rejectedTaskId, _, _) =>
-      val error = s"Task[$rejectedTaskId] rejected because the Worker is busy processing Task[$taskId]"
-      master ! Master.TaskRejected(rejectedTaskId, error)
+  private def waitingForWork(master: ActorRef, task: Task[Any, Any]): Receive = {
+    case ReceiveTimeout =>
+      master ! Master.NextWork
 
-    case TaskExecution(result) =>
+    case StartWork(work) =>
+      val taskExecutor = actorOf(TaskExecutor.props)
+      taskExecutor ! TaskExecutor.Run(task, work)
+      setReceiveTimeout(Duration.Undefined)
+      become(working(master, task, work, taskExecutor))
+
+    case AssignTask(newTask) =>
+      become(waitingForWork(master, newTask))
+
+    case Retire =>
+      setReceiveTimeout(Duration.Undefined)
+      become(idle)
+  }
+
+  private def working(master: ActorRef,
+                      task: Task[Any, Any],
+                      work: Work[Any],
+                      taskExecutor: ActorRef,
+                      retireAfterExecution: Boolean = false): Receive = {
+    case FinishWork(result) =>
       val message = result match {
         case Success(value) =>
-          Master.TaskSucceed(taskId, value)
+          Master.WorkSucceed(task.id, work.id, value)
         case Failure(ex) =>
-          val error = s"Error executing Task[$taskId]. Exception type: ${ex.getClass.getName}. Error: ${ex.getMessage}"
+          val error = s"Error executing Work[${work.id}] for Task[${task.id}]. Exception type: ${ex.getClass.getName}. Error: ${ex.getMessage}"
           log.error(ex, error)
-          Master.TaskFailed(taskId, error)
+          Master.WorkFailed(task.id, work.id, error)
       }
 
       master ! message
       if (retireAfterExecution) {
         become(idle)
       } else {
-        setReceiveTimeout(settings.Worker.WaitingTimeout)
-        become(waitingForWork(master))
+        setReceiveTimeout(settings.Worker.RequestNextWorkInterval)
+        become(waitingForWork(master, task))
       }
 
     case Retire =>
-      become(working(master, taskId, retireAfterExecution = true))
+      become(working(master, task, work, taskExecutor, retireAfterExecution = true))
+
+    case Terminated(`taskExecutor`) =>
+      val error = s"Error executing Work[${work.id}] for Task[${task.id}]. Task executor was unexpectedly terminated"
+      log.error(error)
+      Master.WorkFailed(task.id, work.id, error)
   }
 
   override def receive: Receive = idle

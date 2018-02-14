@@ -6,7 +6,7 @@ import scala.util.Try
 
 object TaskExecutor {
 
-  final case class Task(input: Seq[Any], executable: Seq[Any] => Any)
+  final case class Run[T, R](task: Task[T, R], work: Work[T])
 
   def props: Props = Props(new TaskExecutor)
 }
@@ -16,8 +16,8 @@ class TaskExecutor extends Actor with ActorLogging {
   import TaskExecutor._
 
   override def receive: Receive = {
-    case Task(input, executable) =>
-      val result = Try(executable(input))
-      sender() ! Worker.TaskExecution(result)
+    case Run(task, work) =>
+      val result = Try(task.execution(work.input))
+      sender() ! Worker.FinishWork(result)
   }
 }

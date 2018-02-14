@@ -10,9 +10,20 @@ import scala.concurrent.duration.FiniteDuration
 class SettingsImpl(config: Config) extends Extension {
 
   object Worker {
-    val WaitingTimeout: FiniteDuration = FiniteDuration(
-      config.getDuration("amw.worker.waitingTimeout", TimeUnit.MILLISECONDS),
+    val RequestNextTaskInterval: FiniteDuration = FiniteDuration(
+      config.getDuration("amw.worker.requestNextTaskInterval", TimeUnit.MILLISECONDS),
       TimeUnit.MILLISECONDS)
+
+    val RequestNextWorkInterval: FiniteDuration = FiniteDuration(
+      config.getDuration("amw.worker.requestNextWorkInterval", TimeUnit.MILLISECONDS),
+      TimeUnit.MILLISECONDS)
+  }
+
+  object Master {
+    val EnlistInterval: FiniteDuration = FiniteDuration(
+      config.getDuration("amw.master.enlistInterval", TimeUnit.MILLISECONDS),
+      TimeUnit.MILLISECONDS
+    )
   }
 
 }
